@@ -1,0 +1,35 @@
+# Target: Waveshare ESP32-S3-R8 smartwatch (ESP32-S3 + 8 MB Octal PSRAM)
+CONFIG_IDF_TARGET="esp32s3"
+
+# CPU @ 240 MHz
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# R8 = 8 MB in-package Octal PSRAM. 80 MHz Octal gives ~80 MB/s raw bandwidth.
+# SPIRAM_IGNORE_NOTFOUND lets the same binary boot on PSRAM-less S3 boards or
+# in QEMU by falling back to internal SRAM + zero-copy flash weights.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# 32 KB data cache with 64-byte lines so sequential weight rows burst cleanly
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Compiler: -O2 across the firmware
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Partition table with a dedicated tiny_model slot
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# FreeRTOS at 1000 Hz; watchdogs don't trip while a core is doing inference
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

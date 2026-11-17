@@ -1,0 +1,7 @@
+[mapping:tiny_engine]
+archive: libtiny_engine.a
+entries:
+    if TINY_HOT_CODE_IN_IRAM = y:
+        tiny_engine (noflash)
+        tiny_kernels (noflash)
+        tiny_kernels_s3 (noflash)

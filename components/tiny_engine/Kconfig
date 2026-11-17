@@ -1,0 +1,58 @@
+menu "TINY engine"
+
+    config TINY_USE_PIE
+        bool "Use the ESP32-S3 PIE SIMD unit for int8 dot products"
+        depends on IDF_TARGET_ESP32S3
+        default y
+        help
+            16 int8 multiply-accumulates per instruction. Disable only to
+            compare against the portable C kernel.
+
+    choice TINY_KERNEL
+        prompt "Default numeric kernel"
+        default TINY_KERNEL_PRECISE
+        help
+            Can also be changed at run time per question.
+
+        config TINY_KERNEL_PRECISE
+            bool "Precise: int8 weights x (int8 + int8 residual) activations"
+        config TINY_KERNEL_FAST
+            bool "Fast: single int8 activation pass"
+        config TINY_KERNEL_FLOAT
+            bool "Float: bit-exact with the original DOS program (slow)"
+    endchoice
+
+    config TINY_PREFILL_BLOCK
+        int "Letters of the question processed per weight pass"
+        range 1 32
+        default 16
+        help
+            The question is pushed through the network this many letters at
+            a time so each weight row is read from PSRAM once per block.
+            Scratch memory grows by ~3.5 KB per letter.
+
+    config TINY_FAST_WEIGHT_BUDGET_KB
+        int "Internal SRAM the weights may use (KB)"
+        range 0 400
+        default 128
+        help
+            Weight tables (~370 KB in total) are copied to internal SRAM up to
+            this budget, the rest goes to PSRAM. 0 = all weights in PSRAM.
+            More SRAM = faster answers, less memory for the OS.
+
+    config TINY_FAST_RESERVE_KB
+        int "Internal SRAM always left free for the OS (KB)"
+        range 0 300
+        default 72
+        help
+            The engine never places weights, KV cache or scratch in internal
+            SRAM if that would leave less than this free.
+
+    config TINY_HOT_CODE_IN_IRAM
+        bool "Place the inference code in IRAM"
+        default n
+        help
+            ~10 KB of IRAM. Only helps if the instruction cache is thrashed by
+            other code while TINY is answering.
+
+endmenu

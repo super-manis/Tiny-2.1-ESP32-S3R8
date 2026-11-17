@@ -1,0 +1,12 @@
+menu "TINY watch service"
+
+    config TINY_EMBED_MODEL
+        bool "Embed model/TINY.BIN into the firmware image"
+        default y
+        help
+            Links TINY.BIN (~380 KB) into flash rodata so a single app image
+            is self-contained. If you flash TINY.BIN to a dedicated
+            'tiny_model' partition or onto LittleFS instead, turn this off
+            to keep the app binary small for fast OTA updates.
+
+endmenu

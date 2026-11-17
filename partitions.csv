@@ -1,0 +1,10 @@
+# Partition table for an 8 MB or 16 MB flash Waveshare ESP32-S3-R8 watch.
+# The dedicated tiny_model partition lets the flashing agent update the app
+# without re-flashing the 380 KB weights (or vice versa):
+#   esptool.py write_flash 0x290000 model/TINY.BIN
+# Name,       Type, SubType, Offset,   Size,     Flags
+nvs,          data, nvs,     0x9000,   0x6000,
+phy_init,     data, phy,     0xf000,   0x1000,
+factory,      app,  factory, 0x10000,  0x280000,
+tiny_model,   data, 0x40,    0x290000, 0x70000,
+storage,      data, littlefs,0x300000, 0x100000,
