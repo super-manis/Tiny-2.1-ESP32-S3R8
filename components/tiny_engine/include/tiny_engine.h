@@ -60,14 +60,26 @@ typedef enum {
     TINY_KERNEL_FLOAT = 2,
 } tiny_kernel_t;
 
+/* Whether weight tables may be used directly from the TNY2 blob (e.g.
+ * memory-mapped flash) instead of being copied to RAM. Only tables whose
+ * width is a multiple of 16 qualify (all of them for the stock model). */
+typedef enum {
+    TINY_IN_PLACE_NEVER = 0,   /* always copy; TINY_ERR_NOMEM if RAM runs out */
+    TINY_IN_PLACE_FALLBACK,    /* copy, but use the blob if RAM runs out      */
+    TINY_IN_PLACE_ALWAYS,      /* never copy (PSRAM-less boards, testing)     */
+} tiny_in_place_t;
+
 typedef struct {
     /* Bytes of fast internal SRAM the weights may occupy. Remaining weight
      * tables go to bulk memory (PSRAM on the watch). 0 = everything in bulk.
-     * SIZE_MAX = as much as possible. */
+     * SIZE_MAX = as much as possible. Tables are placed in file order. */
     size_t fast_weight_budget;
     /* Keep at least this much internal heap free for the OS when placing
      * weights / KV cache in fast memory (ignored on the host). */
     size_t fast_reserve;
+    /* Anything but NEVER requires the blob to stay valid (mapped, not
+     * freed) until tiny_model_free(). */
+    tiny_in_place_t in_place;
 } tiny_load_cfg_t;
 
 typedef struct tiny_model tiny_model_t;
@@ -78,6 +90,7 @@ typedef struct {
     size_t params;
     size_t weight_bytes_fast;   /* weights placed in internal SRAM          */
     size_t weight_bytes_bulk;   /* weights placed in PSRAM / bulk memory    */
+    size_t weight_bytes_in_place; /* weights read directly from the blob    */
 } tiny_model_info_t;
 
 /* Information delivered with every generated letter (for the UI). */
@@ -109,10 +122,13 @@ typedef struct {
     float    mean_confidence;
 } tiny_stats_t;
 
+/* On ESP-IDF: CONFIG_TINY_FAST_WEIGHT_BUDGET_KB / CONFIG_TINY_FAST_RESERVE_KB,
+ * in_place = NEVER. On the host: everything in RAM. */
 tiny_load_cfg_t tiny_load_cfg_default(void);
 
 /* Parse a TNY2 network (the original TINY.BIN) from memory. The blob may be
- * memory-mapped flash; it is not referenced after this call returns. */
+ * memory-mapped flash. With cfg->in_place == TINY_IN_PLACE_NEVER it is not
+ * referenced after this call returns; otherwise it must outlive the model. */
 tiny_err_t tiny_model_load(const void *blob, size_t len, const tiny_load_cfg_t *cfg,
                            tiny_model_t **out);
 void       tiny_model_free(tiny_model_t *m);

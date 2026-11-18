@@ -224,7 +224,8 @@ lv_obj_t *tiny_watch_ui_create(lv_obj_t *parent, tiny_watch_t *watch)
     lv_keyboard_set_textarea(ui.kb, ui.ta);
     lv_obj_add_flag(ui.kb, LV_OBJ_FLAG_HIDDEN);
 
-    lv_timer_create(refresh_timer, 33, NULL);
+    if (ui.timer) lv_timer_del(ui.timer);
+    ui.timer = lv_timer_create(refresh_timer, 33, NULL);
     return scr;
 }
 #endif

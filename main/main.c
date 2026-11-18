@@ -6,7 +6,7 @@
  * compile this file. As a standalone firmware image this:
  *   1. Starts the TINY watch service (weights split across SRAM + Octal PSRAM,
  *      worker pinned to core 1).
- *   2. Runs a self-test + benchmark across the three numeric kernels.
+ *   2. Runs a 7-question greedy self-test + throughput benchmark.
  *   3. Drops into a serial console so questions can be typed over USB-JTAG / UART.
  */
 #include <stdio.h>
@@ -78,7 +78,7 @@ void app_main(void)
     uint32_t total_us = 0, total_letters = 0;
     for (int i = 0; i < n; i++) {
         char ans[TINY_CTX + 1];
-        tiny_stats_t st;
+        tiny_stats_t st = { 0 };
         tiny_watch_ask(w, selftest[i].q, 0, ans, sizeof ans, &st);
         int ok = strcmp(ans, selftest[i].expect) == 0;
         pass += ok;
@@ -120,7 +120,7 @@ void app_main(void)
                 tiny_watch_req_t r = {
                     .question = line,
                     .creativity = -1,
-                    .kernel = TINY_KERNEL_PRECISE,
+                    .kernel = tiny_gen_cfg_default().kernel,
                     .on_token = stream_char,
                     .on_done = stream_done,
                     .user = done,
@@ -140,4 +140,6 @@ void app_main(void)
             fflush(stdout);
         }
     }
+    vSemaphoreDelete(done);
+    tiny_watch_stop(w);
 }

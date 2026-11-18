@@ -1,6 +1,9 @@
 /* tiny_host.c - command line TINY for a PC, used to test the engine.
  *
- *   tiny_host [-m TINY.BIN] [-c 0..9] [--float|--fast] [--seed N] [--stats] < questions
+ *   tiny_host [-m TINY.BIN] [-c 0..9] [--float|--fast] [--seed N] [--in-place] [--stats] < questions
+ *
+ * --in-place runs the weight tables straight from the file image (as on a
+ * PSRAM-less board) instead of repacked copies; answers must not change.
  *
  * Reads one question per line and prints one answer per line (no prompt),
  * so outputs of different builds / kernels can be diffed. */
@@ -14,6 +17,7 @@ int main(int argc, char **argv)
     const char *path = "model/TINY.BIN";
     tiny_gen_cfg_t g = tiny_gen_cfg_default();
     int show_stats = 0;
+    tiny_load_cfg_t lc = tiny_load_cfg_default();
     g.creativity = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-m") && i + 1 < argc) path = argv[++i];
@@ -22,7 +26,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--fast")) g.kernel = TINY_KERNEL_FAST;
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) g.seed = (uint32_t)strtoul(argv[++i], 0, 0);
         else if (!strcmp(argv[i], "--stats")) show_stats = 1;
-        else { fprintf(stderr, "usage: %s [-m TINY.BIN] [-c N] [--float|--fast] [--seed N] [--stats]\n", argv[0]); return 2; }
+        else if (!strcmp(argv[i], "--in-place")) lc.in_place = TINY_IN_PLACE_ALWAYS;
+        else { fprintf(stderr, "usage: %s [-m TINY.BIN] [-c N] [--float|--fast] [--seed N] [--in-place] [--stats]\n", argv[0]); return 2; }
     }
     FILE *fp = fopen(path, "rb");
     if (!fp) { perror(path); return 1; }
@@ -32,7 +37,7 @@ int main(int argc, char **argv)
 
     tiny_model_t *m;
     tiny_ctx_t *c;
-    tiny_err_t e = tiny_model_load(blob, len, NULL, &m);
+    tiny_err_t e = tiny_model_load(blob, len, &lc, &m);
     if (e) { fprintf(stderr, "load: %s\n", tiny_err_str(e)); return 1; }
     if ((e = tiny_ctx_create(m, &c))) { fprintf(stderr, "ctx: %s\n", tiny_err_str(e)); return 1; }
 

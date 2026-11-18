@@ -39,9 +39,11 @@
 #define MAX_ALLOCS (8 + 6 * TINY_MAX_LAYERS)
 
 typedef struct {
-    const float  *scale;   /* one per row                      */
-    const int8_t *w;       /* rows x stride, 16-byte aligned   */
+    const float  *scale;   /* one per row                                  */
+    const int8_t *w;       /* rows x stride                                */
     int rows, cols, stride;
+    int len;               /* dot product length: ALIGN16(cols), zero padded
+                            * in RAM; == cols for in-place tables          */
 } table_t;
 
 struct tiny_model {
@@ -51,8 +53,10 @@ struct tiny_model {
     table_t wq[TINY_MAX_LAYERS], wk[TINY_MAX_LAYERS], wv[TINY_MAX_LAYERS], wo[TINY_MAX_LAYERS];
     table_t f1[TINY_MAX_LAYERS], f2[TINY_MAX_LAYERS];
     const float *g1[TINY_MAX_LAYERS], *g2[TINY_MAX_LAYERS], *gf;
-    size_t fast_reserve;
-    size_t bytes_fast, bytes_bulk, params;
+    size_t fast_reserve;   /* internal RAM to leave free (KV cache, scratch) */
+    size_t weight_reserve; /* same for weights; +160 KB if there is no PSRAM */
+    tiny_in_place_t in_place;
+    size_t bytes_fast, bytes_bulk, bytes_in_place, params;
     void *allocs[MAX_ALLOCS];
     int nallocs;
 };
@@ -152,12 +156,7 @@ static void *model_alloc(tiny_model_t *m, size_t size, int prefer_fast, size_t *
     size = ALIGN16(size);
     if (prefer_fast && size <= *budget) {
         size_t freeb = tiny_port_fast_free();
-        /* If there is no PSRAM, save ~160 KB of internal RAM for the KV cache
-         * and prefill scratch; remaining weight tables run in-place from flash. */
-        size_t keep = m->fast_reserve;
-        void *probe = tiny_port_alloc(16, TINY_MEM_BULK);
-        if (probe) tiny_port_free(probe);
-        else keep += 160 * 1024;
+        size_t keep = m->weight_reserve;
         if (freeb != SIZE_MAX ? (freeb > size + keep && tiny_port_fast_largest() >= size) : 1)
             p = tiny_port_alloc(size, TINY_MEM_FAST);
         if (p) {
@@ -178,8 +177,13 @@ static tiny_err_t load_table(tiny_model_t *m, reader_t *r, table_t *t, int rows,
                              float **scales, int prefer_fast, size_t *budget)
 {
     const uint8_t *raw = r->p;
-    int stride = ALIGN16(cols);
-    int8_t *w = (int8_t *)model_alloc(m, (size_t)rows * stride, prefer_fast, budget);
+    const int stride = ALIGN16(cols);
+    const int can_in_place = m->in_place != TINY_IN_PLACE_NEVER && cols % 16 == 0;
+    int8_t *w = NULL;
+    if (!(can_in_place && m->in_place == TINY_IN_PLACE_ALWAYS))
+        w = (int8_t *)model_alloc(m, (size_t)rows * stride, prefer_fast, budget);
+    if (!w && !can_in_place)
+        return TINY_ERR_NOMEM;
     float *sc = *scales;
     *scales += rows;
     for (int i = 0; i < rows; i++) {
@@ -195,14 +199,14 @@ static tiny_err_t load_table(tiny_model_t *m, reader_t *r, table_t *t, int rows,
     if (w) {
         t->w = w;
         t->stride = stride;
-    } else if (cols % 16 == 0) {
-        /* Zero-copy fallback (e.g. PSRAM-less board or emulator with embedded
-         * flash rodata): point directly into the TNY2 stream. */
+    } else {
+        /* In place: point into the TNY2 stream (row = 4-byte scale + cols
+         * int8). Rows are not 16-byte aligned; the PIE kernel copes. */
         t->w = (const int8_t *)(raw + 4);
         t->stride = 4 + cols;
-    } else {
-        return TINY_ERR_NOMEM;
+        m->bytes_in_place += (size_t)rows * cols;
     }
+    t->len = stride;
     t->scale = sc;
     t->rows = rows;
     t->cols = cols;
@@ -223,7 +227,16 @@ static tiny_err_t load_gains(tiny_model_t *m, reader_t *r, const float **g, floa
 
 tiny_load_cfg_t tiny_load_cfg_default(void)
 {
-    tiny_load_cfg_t c = { .fast_weight_budget = SIZE_MAX, .fast_reserve = 64 * 1024 };
+    tiny_load_cfg_t c;
+    memset(&c, 0, sizeof c);
+#if defined(CONFIG_TINY_FAST_WEIGHT_BUDGET_KB) && defined(CONFIG_TINY_FAST_RESERVE_KB)
+    c.fast_weight_budget = (size_t)CONFIG_TINY_FAST_WEIGHT_BUDGET_KB * 1024;
+    c.fast_reserve = (size_t)CONFIG_TINY_FAST_RESERVE_KB * 1024;
+#else
+    c.fast_weight_budget = SIZE_MAX;
+    c.fast_reserve = 64 * 1024;
+#endif
+    c.in_place = TINY_IN_PLACE_NEVER;
     return c;
 }
 
@@ -313,6 +326,7 @@ void tiny_model_get_info(const tiny_model_t *m, tiny_model_info_t *info)
     info->params = m->params;
     info->weight_bytes_fast = m->bytes_fast;
     info->weight_bytes_bulk = m->bytes_bulk;
+    info->weight_bytes_in_place = m->bytes_in_place;
 }
 
 /* ------------------------------------------------------------------ */
@@ -447,7 +461,7 @@ static void quantize_block(tiny_ctx_t *c, const float *in, int is, int n, int co
 static void matmul(tiny_ctx_t *c, const table_t *tb, const float *in, int is,
                    int n, float *out, int os)
 {
-    const int rows = tb->rows, cols = tb->cols, stride = tb->stride;
+    const int rows = tb->rows, cols = tb->cols, stride = tb->stride, len = tb->len;
     const int8_t *w = tb->w;
     if (c->kernel == TINY_KERNEL_FLOAT) {
         for (int r = 0; r < rows; r++, w += stride) {
@@ -469,15 +483,15 @@ static void matmul(tiny_ctx_t *c, const table_t *tb, const float *in, int is,
         for (int r = 0; r < rows; r++, w += stride) {
             const float sc = tb->scale[r];
             for (int t = 0; t < n; t++)          /* row w stays in L1 cache */
-                out[t * os + r] = ((float)tiny_dot_s8(w, xq + t * qs, stride) * c->xs[t] +
-                                   (float)tiny_dot_s8(w, xq2 + t * qs, stride) * c->xs2[t]) * sc;
+                out[t * os + r] = ((float)tiny_dot_s8(w, xq + t * qs, len) * c->xs[t] +
+                                   (float)tiny_dot_s8(w, xq2 + t * qs, len) * c->xs2[t]) * sc;
         }
         return;
     }
     for (int r = 0; r < rows; r++, w += stride) {
         const float sc = tb->scale[r];
         for (int t = 0; t < n; t++)
-            out[t * os + r] = (float)tiny_dot_s8(w, xq + t * qs, stride) * (sc * c->xs[t]);
+            out[t * os + r] = (float)tiny_dot_s8(w, xq + t * qs, len) * (sc * c->xs[t]);
     }
 }
 

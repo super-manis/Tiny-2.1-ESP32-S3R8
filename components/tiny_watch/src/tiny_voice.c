@@ -4,8 +4,8 @@
  * by alternating two formant-like frequencies every 2 ms, s/f/h hissed with
  * random frequencies, p/t/k clicked, and the pitch drifted down through the
  * sentence. Here we render the exact same recipe into a small PCM buffer at
- * e.g. 16 kHz with a raised-cosine envelope so it doesn't pop on the
- * watch's speaker amp.
+ * e.g. 16 kHz with a 2 ms linear fade on each phoneme so it doesn't pop on
+ * the watch's speaker amp.
  */
 #include <stdint.h>
 #include <string.h>

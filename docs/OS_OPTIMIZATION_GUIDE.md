@@ -8,32 +8,33 @@ packaging, and flashing on the **Waveshare ESP32-S3-R8** smartwatch.
 ## 1. What TINY 2.1 Is on the Watch
 
 TINY 2.1 is a 4-layer, 96-wide, 4-head causal transformer (`VOCAB = 97`
-printable ASCII characters, `CTX = 128` characters) with **367,488 parameters**
-stored as row-wise int8 weights (`scale[row]` in fp32 + `int8[cols]`).
+printable ASCII characters, `CTX = 128` characters) with **367,552 parameters**
+(366,624 int8 matrix weights + 928 fp32 RMSNorm gains) stored as row-wise int8
+tables (`scale[row]` in fp32 + `int8[cols]`).
 
 The port splits the project into three ESP-IDF components under [`components/`](../components):
 
 | Component | Role | Dependencies |
 |---|---|---|
-| [`tiny_engine`](../components/tiny_engine) | Pure inference engine + ESP32-S3 PIE SIMD kernel | `esp_timer`, `heap`, `freertos` |
-| [`tiny_watch`](../components/tiny_watch) | FreeRTOS worker task, `esp_pm` frequency lock, partition/VFS/rodata loader, 16-bit PCM robot voice | `tiny_engine`, `esp_partition`, `spi_flash`, `esp_pm` |
-| [`tiny_watch_ui`](../components/tiny_watch_ui) | Optional LVGL v8/v9 watch screen (compiled only if `lvgl` is in the build) | `tiny_watch`, `lvgl` (optional) |
+| [`tiny_engine`](../components/tiny_engine) | Pure inference engine + ESP32-S3 PIE SIMD kernel | `esp_timer`, `esp_hw_support`, `heap`, `freertos` |
+| [`tiny_watch`](../components/tiny_watch) | FreeRTOS worker task, `esp_pm` frequency lock, partition/VFS/rodata loader, 16-bit PCM robot voice | `tiny_engine`, `esp_partition`, `spi_flash`, `esp_pm`, `log`, `freertos` |
+| [`tiny_watch_ui`](../components/tiny_watch_ui) | Optional LVGL v8/v9 watch screen (compiled only if `lvgl` is in the build) | `tiny_watch`, `freertos`, `lvgl` (optional) |
 
 ---
 
 ## 2. Memory Budget on the ESP32-S3-R8
 
 The ESP32-S3-R8 has **512 KB of internal SRAM** and **8 MB of Octal PSRAM**.
-Every letter generated touches all 367 KB of weights, so memory placement
+Every letter generated touches all 366 KB of weights, so memory placement
 directly determines speed and whether the rest of the watch OS has enough
 internal RAM for DMA, Wi-Fi/BLE, and LVGL draw buffers.
 
 | Allocation | Size | Where it lives | Config knob |
 |---|---|---|---|
-| Weight tables (repacked, 16 B aligned) | **368 KB** total | First `N` KB in **internal SRAM**, rest in **Octal PSRAM** | `CONFIG_TINY_FAST_WEIGHT_BUDGET_KB` (default `128`) |
-| Row scales & RMSNorm gains | **18 KB** | Internal SRAM | automatic |
-| KV cache (4 layers x 128 ctx x 96 int8 x 2 + scales) | **102 KB** | Internal SRAM if above reserve, else PSRAM | `CONFIG_TINY_FAST_RESERVE_KB` (default `72`) |
-| Block prefill scratch (`B = 16` tokens) | **51 KB** | Internal SRAM (always) | `CONFIG_TINY_PREFILL_BLOCK` (default `16`) |
+| Weight tables (repacked, 16 B aligned) | **358 KB** total (`pos` is 12 KB in PSRAM; the other 25 tables are 346 KB) | Up to `N` KB in **internal SRAM** (in file order), rest in **Octal PSRAM** | `CONFIG_TINY_FAST_WEIGHT_BUDGET_KB` (default `128`) |
+| Row scales & RMSNorm gains | **19 KB** | Internal SRAM | automatic |
+| KV cache (4 layers x 128 ctx x 96 int8 x 2 + scales) | **100 KB** | Internal SRAM if above reserve, else PSRAM | `CONFIG_TINY_FAST_RESERVE_KB` (default `72`) |
+| Block prefill scratch (`B = 16` tokens) | **54 KB** | Internal SRAM if above reserve, else PSRAM | `CONFIG_TINY_PREFILL_BLOCK` (default `16`) |
 | Worker task stack | **6 KB** | Internal SRAM | `tiny_watch_cfg_t.worker_stack` |
 
 **Hard rule enforced by the allocator:** the engine will never allocate from
@@ -44,13 +45,20 @@ per table (~9 KB - 24 KB each, so heap fragmentation does not hurt it).
 
 ### Recommended settings depending on what else the watch OS runs
 
+Weight tables are placed in file order (`emb` 9 KB, then each layer's
+`wq/wk/wv/wo` = 4 x 9 KB = 36 KB and `f1/f2` = 2 x 24 KB = 48 KB, i.e. 84 KB per
+layer; `pos` always goes to PSRAM). Any individual table that exceeds the
+remaining SRAM budget is skipped, and smaller later tables still use whatever
+budget remains:
+
 * **BLE + LVGL watch face (no Wi-Fi):** `CONFIG_TINY_FAST_WEIGHT_BUDGET_KB=160`,
-  `CONFIG_TINY_FAST_RESERVE_KB=72`. Keeps `emb`, all 16 attention matrices
-  (`wq/wk/wv/wo`), and the scratch buffers in internal SRAM; only the FFN
-  tables (`f1/f2`) stream from Octal PSRAM.
+  `CONFIG_TINY_FAST_RESERVE_KB=72`. Keeps `emb`, all of layer 0, all of layer 1's
+  attention (`wq/wk/wv/wo`) + `f1`, and `wq` of layer 2 in internal SRAM
+  (153 KB); the remaining tables stream from Octal PSRAM.
 * **Wi-Fi + BLE + LVGL simultaneously active:** `CONFIG_TINY_FAST_WEIGHT_BUDGET_KB=48`,
-  `CONFIG_TINY_FAST_RESERVE_KB=96`. `emb` + scratch stay in internal SRAM;
-  everything else streams from PSRAM through the 32 KB / 64 B data cache.
+  `CONFIG_TINY_FAST_RESERVE_KB=96`. Keeps `emb` + all four attention matrices of
+  layer 0 (45 KB) and scratch in internal SRAM; everything else streams from
+  PSRAM through the 32 KB / 64 B data cache.
 
 ---
 
@@ -128,14 +136,16 @@ PIE instructions inside an ISR routed to Core 1.
 
 ## 4. Packaging & Flashing `TINY.BIN`
 
-`tiny_watch_start()` looks for the 382,100-byte `TINY.BIN` in four places, in
+`tiny_watch_start()` looks for the 381,808-byte `TINY.BIN` in four places, in
 order:
 
 1. `cfg->blob` / `cfg->blob_len` (caller-supplied pointer).
 2. **Raw flash partition** labeled `"tiny_model"` (default, **recommended for
    OTA**): `esp_partition_mmap()` maps the partition during `tiny_watch_start()`,
-   repacks the int8 tables into SRAM/PSRAM, and immediately unmaps it (zero
-   permanent MMU pages used).
+   repacks the int8 tables into SRAM/PSRAM, and immediately unmaps it so zero
+   permanent MMU pages are used (unless RAM runs out and a table has to fall
+   back to in-place flash access, in which case the mapping is kept until
+   `tiny_watch_stop()`).
 3. **Filesystem file** `/storage/TINY.BIN` (LittleFS / SPIFFS / SD).
 4. **Embedded `.rodata`** when `CONFIG_TINY_EMBED_MODEL=y` (default for
    single-binary flashing).

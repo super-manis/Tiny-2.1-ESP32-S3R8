@@ -38,11 +38,14 @@ struct tiny_watch {
     tiny_ctx_t       *ctx;
     TaskHandle_t      task;
     QueueHandle_t     queue;
-    SemaphoreHandle_t idle_sem;
+    SemaphoreHandle_t exit_sem;       /* given once, when the worker exits */
     esp_pm_lock_handle_t pm_lock;
+    esp_partition_mmap_handle_t map;  /* kept while tables run in place    */
+    bool              mapped;
 
     volatile bool     busy;
     volatile bool     cancel;
+    volatile bool     quitting;
     int               creativity;
     bool              speak;
     int               sample_rate_hz;
@@ -65,8 +68,8 @@ static size_t tny2_expected_size(const uint8_t *h, size_t max_len)
            4 * (size_t)D;
 }
 
-static tiny_err_t try_load_partition(const char *label, const tiny_load_cfg_t *lcfg,
-                                     tiny_model_t **out)
+static tiny_err_t try_load_partition(tiny_watch_t *w, const char *label,
+                                     const tiny_load_cfg_t *lcfg)
 {
     if (!label || !label[0]) return TINY_ERR_FORMAT;
     const esp_partition_t *p = esp_partition_find_first(
@@ -77,15 +80,22 @@ static tiny_err_t try_load_partition(const char *label, const tiny_load_cfg_t *l
     if (esp_partition_mmap(p, 0, p->size, ESP_PARTITION_MMAP_DATA, &map, &mh) != ESP_OK)
         return TINY_ERR_FORMAT;
     size_t sz = tny2_expected_size((const uint8_t *)map, p->size);
-    tiny_err_t e = sz && sz <= p->size ? tiny_model_load(map, sz, lcfg, out) : TINY_ERR_FORMAT;
-    esp_partition_munmap(mh);
+    tiny_err_t e = sz && sz <= p->size ? tiny_model_load(map, sz, lcfg, &w->model) : TINY_ERR_FORMAT;
+    tiny_model_info_t mi = { 0 };
+    if (e == TINY_OK)
+        tiny_model_get_info(w->model, &mi);
+    if (mi.weight_bytes_in_place) {
+        w->map = mh;                    /* tables point into the mapping */
+        w->mapped = true;
+    } else {
+        esp_partition_munmap(mh);
+    }
     if (e == TINY_OK)
         ESP_LOGI(TAG, "loaded weights from partition '%s' (%u bytes)", label, (unsigned)sz);
     return e;
 }
 
-static tiny_err_t try_load_file(const char *path, const tiny_load_cfg_t *lcfg,
-                                tiny_model_t **out)
+static tiny_err_t try_load_file(tiny_watch_t *w, const char *path, const tiny_load_cfg_t *lcfg)
 {
     if (!path || !path[0]) return TINY_ERR_FORMAT;
     FILE *fp = fopen(path, "rb");
@@ -99,7 +109,10 @@ static tiny_err_t try_load_file(const char *path, const tiny_load_cfg_t *lcfg,
     if (!buf) { fclose(fp); return TINY_ERR_NOMEM; }
     size_t rd = fread(buf, 1, (size_t)len, fp);
     fclose(fp);
-    tiny_err_t e = rd == (size_t)len ? tiny_model_load(buf, rd, lcfg, out) : TINY_ERR_FORMAT;
+    /* the buffer is freed below, so tables must not point into it */
+    tiny_load_cfg_t c = *lcfg;
+    c.in_place = TINY_IN_PLACE_NEVER;
+    tiny_err_t e = rd == (size_t)len ? tiny_model_load(buf, rd, &c, &w->model) : TINY_ERR_FORMAT;
     free(buf);
     if (e == TINY_OK)
         ESP_LOGI(TAG, "loaded weights from '%s' (%ld bytes)", path, len);
@@ -127,6 +140,12 @@ static void worker_main(void *arg)
 
     while (xQueueReceive(w->queue, &job, portMAX_DELAY) == pdTRUE) {
         if (job.quit) break;
+        if (w->quitting) {
+            /* tiny_watch_stop() is waiting: don't start new work, but still
+             * complete the request so blocking callers wake up. */
+            if (job.on_done) job.on_done(job.user, TINY_ERR_CANCELLED, "", NULL);
+            continue;
+        }
         w->cancel = false;
         w->busy = true;
         if (w->pm_lock) esp_pm_lock_acquire(w->pm_lock);
@@ -149,9 +168,8 @@ static void worker_main(void *arg)
             tiny_voice_speak(answer, w->sample_rate_hz, w->on_pcm, w->pcm_user, &w->cancel);
 
         w->busy = false;
-        xSemaphoreGive(w->idle_sem);
     }
-    xSemaphoreGive(w->idle_sem);
+    xSemaphoreGive(w->exit_sem);
     vTaskDelete(NULL);
 }
 
@@ -186,40 +204,52 @@ tiny_err_t tiny_watch_start(const tiny_watch_cfg_t *cfg, tiny_watch_t **out)
     w->on_pcm = cfg->on_pcm;
     w->pcm_user = cfg->pcm_user;
 
+    /* Partition and embedded rodata live in flash and stay mapped, so on a
+     * PSRAM-less board (or when RAM is tight) they may fall back to in-place
+     * tables. The caller's cfg->load.in_place is respected if explicitly set. */
+    tiny_load_cfg_t flash_load = cfg->load;
+    if (flash_load.in_place == TINY_IN_PLACE_NEVER)
+        flash_load.in_place = TINY_IN_PLACE_FALLBACK;
+
     tiny_err_t e = TINY_ERR_FORMAT;
     if (cfg->blob && cfg->blob_len)
         e = tiny_model_load(cfg->blob, cfg->blob_len, &cfg->load, &w->model);
     if (e != TINY_OK)
-        e = try_load_partition(cfg->partition_label, &cfg->load, &w->model);
+        e = try_load_partition(w, cfg->partition_label, &flash_load);
     if (e != TINY_OK)
-        e = try_load_file(cfg->file_path, &cfg->load, &w->model);
+        e = try_load_file(w, cfg->file_path, &cfg->load);
 #if CONFIG_TINY_EMBED_MODEL
     if (e != TINY_OK) {
         size_t len = (size_t)(tiny_bin_end - tiny_bin_start);
         size_t sz = tny2_expected_size(tiny_bin_start, len);
-        e = tiny_model_load(tiny_bin_start, sz ? sz : len, &cfg->load, &w->model);
+        e = tiny_model_load(tiny_bin_start, sz ? sz : len, &flash_load, &w->model);
         if (e == TINY_OK)
             ESP_LOGI(TAG, "loaded embedded TINY.BIN (%u bytes)", (unsigned)(sz ? sz : len));
     }
 #endif
-    if (e != TINY_OK) { free(w); return e; }
+    if (e != TINY_OK) { tiny_watch_stop(w); return e; }
 
     e = tiny_ctx_create(w->model, &w->ctx);
-    if (e != TINY_OK) { tiny_model_free(w->model); free(w); return e; }
+    if (e != TINY_OK) { tiny_watch_stop(w); return e; }
 
     tiny_model_info_t mi;
     tiny_model_get_info(w->model, &mi);
-    ESP_LOGI(TAG, "ready: %d layers, %d wide (%u KB in SRAM, %u KB in PSRAM)",
+    ESP_LOGI(TAG, "ready: %d layers, %d wide (%u KB in SRAM, %u KB in PSRAM, %u KB in flash)",
              mi.layers, mi.d_model,
              (unsigned)(mi.weight_bytes_fast / 1024),
-             (unsigned)(mi.weight_bytes_bulk / 1024));
+             (unsigned)(mi.weight_bytes_bulk / 1024),
+             (unsigned)(mi.weight_bytes_in_place / 1024));
 
 #if CONFIG_PM_ENABLE
     if (cfg->acquire_pm_lock)
         esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "tiny_ai", &w->pm_lock);
 #endif
     w->queue = xQueueCreate(2, sizeof(job_t));
-    w->idle_sem = xSemaphoreCreateBinary();
+    w->exit_sem = xSemaphoreCreateBinary();
+    if (!w->queue || !w->exit_sem) {
+        tiny_watch_stop(w);
+        return TINY_ERR_NOMEM;
+    }
     BaseType_t ok;
     if (cfg->worker_core >= 0 && cfg->worker_core < portNUM_PROCESSORS)
         ok = xTaskCreatePinnedToCore(worker_main, "tiny_ai", (uint32_t)cfg->worker_stack, w,
@@ -239,22 +269,24 @@ void tiny_watch_stop(tiny_watch_t *w)
 {
     if (!w) return;
     if (w->task) {
+        w->quitting = true;
         w->cancel = true;
         job_t q = { .quit = true };
         xQueueSend(w->queue, &q, portMAX_DELAY);
-        xSemaphoreTake(w->idle_sem, portMAX_DELAY);
+        xSemaphoreTake(w->exit_sem, portMAX_DELAY);
     }
     if (w->pm_lock) esp_pm_lock_delete(w->pm_lock);
     if (w->queue) vQueueDelete(w->queue);
-    if (w->idle_sem) vSemaphoreDelete(w->idle_sem);
+    if (w->exit_sem) vSemaphoreDelete(w->exit_sem);
     tiny_ctx_free(w->ctx);
     tiny_model_free(w->model);
+    if (w->mapped) esp_partition_munmap(w->map);
     free(w);
 }
 
 tiny_err_t tiny_watch_ask_async(tiny_watch_t *w, const tiny_watch_req_t *req)
 {
-    if (!w || !req || !req->question) return TINY_ERR_ARG;
+    if (!w || w->quitting || !req || !req->question) return TINY_ERR_ARG;
     job_t j;
     memset(&j, 0, sizeof j);
     if (tiny_clean_question(req->question, j.question) == 0)

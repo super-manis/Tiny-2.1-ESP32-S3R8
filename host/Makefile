@@ -27,8 +27,12 @@ build/ref.txt: tiny_ref $(Q)
 
 test: tiny_host build/ref.txt
 	./tiny_host -m $(MODEL) --float < $(Q) > build/float.txt
-	./tiny_host -m $(MODEL) < $(Q) > build/int8.txt
-	python3 tests/compare.py $(Q) build/ref.txt build/float.txt build/int8.txt
+	./tiny_host -m $(MODEL) < $(Q) > build/precise.txt
+	./tiny_host -m $(MODEL) --in-place < $(Q) > build/precise_in_place.txt
+	./tiny_host -m $(MODEL) --fast < $(Q) > build/fast.txt
+	python3 tests/compare.py $(Q) build/ref.txt build/float.txt build/precise.txt \
+		--min-precise 0.99 --fast build/fast.txt --min-fast 0.90 \
+		--same-as-precise build/precise_in_place.txt
 
 bench: tiny_host
 	./tiny_host -m $(MODEL) --stats < $(Q) > /dev/null

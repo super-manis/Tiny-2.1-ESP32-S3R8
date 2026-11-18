@@ -15,7 +15,7 @@ ESP-IDF firmware & component suite for the **Waveshare ESP32-S3-R8** smartwatch
 | [`components/tiny_watch`](components/tiny_watch) | FreeRTOS worker service (pinned to Core 1), `esp_pm` frequency lock, partition / VFS / embedded weight loader, and 16-bit PCM synthesiser for the classic TINY robot voice |
 | [`components/tiny_watch_ui`](components/tiny_watch_ui) | Optional LVGL (v8/v9) round-bezel watch screen with live 4-layer neural activity bars, confidence meter, preset chips, and touch keyboard |
 | [`main/main.c`](main/main.c) | Standalone ESP-IDF entry point (boot self-test, throughput benchmark, and interactive USB-JTAG / UART shell) |
-| [`model/TINY.BIN`](model/TINY.BIN) | The trained 4-layer, 96-wide int8 network (`TNY2`, 382,100 bytes) |
+| [`model/TINY.BIN`](model/TINY.BIN) | The trained 4-layer, 96-wide int8 network (`TNY2`, 381,808 bytes) |
 | [`host/`](host) | Linux host build & 216-question regression suite against the unchanged DOS reference |
 | [`docs/OS_OPTIMIZATION_GUIDE.md`](docs/OS_OPTIMIZATION_GUIDE.md) | Watch OS `sdkconfig`, memory budget, dual-core scheduling, and partition/OTA instructions for the companion flashing agent |
 | [`legacy/dos/`](legacy/dos) | Original DOS / Turbo C 2.0 sources (`TINY.C`, `TINY.EXE`, `BUILD.BAT`) |

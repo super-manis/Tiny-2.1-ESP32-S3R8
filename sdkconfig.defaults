@@ -5,8 +5,10 @@ CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
 # R8 = 8 MB in-package Octal PSRAM. 80 MHz Octal gives ~80 MB/s raw bandwidth.
-# SPIRAM_IGNORE_NOTFOUND lets the same binary boot on PSRAM-less S3 boards or
-# in QEMU by falling back to internal SRAM + zero-copy flash weights.
+# SPIRAM_IGNORE_NOTFOUND lets the same binary boot on PSRAM-less S3 boards by
+# falling back to internal SRAM + in-place flash weights. (Note: QEMU's esp32s3
+# machine does not emulate the Octal PSRAM controller; build with
+# CONFIG_SPIRAM_MODE_QUAD=y or CONFIG_SPIRAM=n when running under QEMU.)
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y

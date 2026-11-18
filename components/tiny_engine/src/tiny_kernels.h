@@ -7,8 +7,9 @@
 extern "C" {
 #endif
 
-/* Sum a[i]*b[i] for int8 vectors. n must be a positive multiple of 16 and
- * both pointers 16-byte aligned (the engine guarantees this). */
+/* Sum a[i]*b[i] for int8 vectors. n must be a positive multiple of 16; b
+ * must be 16-byte aligned. a is 16-byte aligned for tables in RAM and
+ * unaligned for in-place tables (the PIE kernel handles both). */
 int32_t tiny_dot_s8(const int8_t *a, const int8_t *b, int n);
 
 /* Same for any n / alignment (short attention heads). */
